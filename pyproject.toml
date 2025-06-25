@@ -1,0 +1,20 @@
+[project]
+name = "stocktradebyz"
+version = "0.1.0"
+description = "Z哥选股策略的Python实战"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "akshare==1.16.84",
+    "numpy==2.3.0",
+    "pandas==2.3.0",
+    "tqdm==4.66.4",
+    "sqlalchemy>=2.0.0",
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "pydantic>=2.5.0",
+    "alembic>=1.13.0",
+    "schedule>=1.2.0",
+    "python-multipart>=0.0.6",
+    "jinja2>=3.1.0",
+]

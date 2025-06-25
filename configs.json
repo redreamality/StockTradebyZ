@@ -5,9 +5,9 @@
       "alias": "少妇战法",
       "activate": true,
       "params": {
-        "threshold": -6,
-        "bbi_min_window": 17,
-        "bbi_offset_n": 2,
+        "threshold": 10,
+        "bbi_min_window": 10,
+        "bbi_offset_n": 8,
         "max_window": 60
       }
     },
