@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chart Test</title>
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+    <div id="chart" style="width: 800px; height: 400px; border: 1px solid #ccc;"></div>
+    
+    <script>
+        console.log('Testing TradingView library...');
+        console.log('LightweightCharts available:', typeof window.LightweightCharts);
+        
+        if (typeof window.LightweightCharts !== 'undefined') {
+            console.log('Creating chart...');
+            
+            const chart = window.LightweightCharts.createChart(document.getElementById('chart'), {
+                width: 800,
+                height: 400,
+                layout: {
+                    backgroundColor: '#ffffff',
+                    textColor: '#333',
+                },
+            });
+            
+            const candlestickSeries = chart.addCandlestickSeries({
+                upColor: '#26a69a',
+                downColor: '#ef5350',
+                borderVisible: false,
+                wickUpColor: '#26a69a',
+                wickDownColor: '#ef5350',
+            });
+            
+            // Test data
+            const testData = [
+                { time: '2024-01-01', open: 100, high: 110, low: 95, close: 105 },
+                { time: '2024-01-02', open: 105, high: 115, low: 100, close: 108 },
+                { time: '2024-01-03', open: 108, high: 112, low: 102, close: 110 },
+                { time: '2024-01-04', open: 110, high: 118, low: 108, close: 115 },
+                { time: '2024-01-05', open: 115, high: 120, low: 110, close: 112 },
+            ];
+            
+            candlestickSeries.setData(testData);
+            console.log('Chart created successfully with test data');
+        } else {
+            console.error('TradingView library not loaded');
+        }
+    </script>
+</body>
+</html>

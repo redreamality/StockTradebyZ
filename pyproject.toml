@@ -15,6 +15,8 @@ dependencies = [
     "pydantic>=2.5.0",
     "alembic>=1.13.0",
     "schedule>=1.2.0",
+    "apscheduler>=3.10.0",
+    "pytz>=2023.3",
     "python-multipart>=0.0.6",
     "jinja2>=3.1.0",
 ]

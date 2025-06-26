@@ -8,7 +8,8 @@ class StockDashboard {
         this.currentPage = 1;
         this.itemsPerPage = 20;
         this.charts = {};
-        
+        this.chartModal = null;
+
         this.init();
     }
     
@@ -19,10 +20,10 @@ class StockDashboard {
             this.setupEventListeners();
             console.log('Initializing charts...');
             this.initializeCharts();
+            console.log('Initializing chart modal...');
+            this.initializeChartModal();
             console.log('Loading initial data...');
             await this.loadInitialData();
-            console.log('Updating last update time...');
-            this.updateLastUpdateTime();
             console.log('Dashboard initialization complete');
         } catch (error) {
             console.error('Initialization error:', error);
@@ -33,7 +34,9 @@ class StockDashboard {
     async loadInitialData() {
         await Promise.all([
             this.loadStats(),
-            this.loadLatestSelections()
+            this.loadLatestSelections(),
+            this.loadDataUpdateStatus(),
+            this.loadDataFreshness()
         ]);
     }
     
@@ -70,6 +73,39 @@ class StockDashboard {
         } catch (error) {
             console.error('Error loading selections:', error);
             this.showError('加载选股数据失败: ' + error.message);
+        }
+    }
+
+    async loadDataUpdateStatus() {
+        try {
+            console.log('Loading data update status from:', `${this.apiBaseUrl}/data-update-status/latest`);
+            const response = await fetch(`${this.apiBaseUrl}/data-update-status/latest`);
+            console.log('Data update status response status:', response.status);
+            if (!response.ok) throw new Error(`Failed to load data update status: ${response.status} ${response.statusText}`);
+
+            const status = await response.json();
+            console.log('Data update status:', status);
+            this.updateLastUpdateTime(status);
+        } catch (error) {
+            console.error('Error loading data update status:', error);
+            // Fallback to current time if API fails
+            this.updateLastUpdateTime(null);
+        }
+    }
+
+    async loadDataFreshness() {
+        try {
+            console.log('Loading data freshness from:', `${this.apiBaseUrl}/data-freshness`);
+            const response = await fetch(`${this.apiBaseUrl}/data-freshness`);
+            console.log('Data freshness response status:', response.status);
+            if (!response.ok) throw new Error(`Failed to load data freshness: ${response.status} ${response.statusText}`);
+
+            const freshness = await response.json();
+            console.log('Data freshness:', freshness);
+            this.updateDataFreshnessIndicator(freshness);
+        } catch (error) {
+            console.error('Error loading data freshness:', error);
+            this.updateDataFreshnessIndicator(null);
         }
     }
     
@@ -117,8 +153,11 @@ class StockDashboard {
                     }
                 </td>
                 <td>
-                    <button class="btn btn-sm btn-outline-primary" onclick="dashboard.showStockDetail('${item.stock_code}')">
+                    <button class="btn btn-sm btn-outline-primary me-1" onclick="dashboard.showStockDetail('${item.stock_code}')">
                         <i class="fas fa-eye"></i> 详情
+                    </button>
+                    <button class="btn btn-sm btn-outline-success" onclick="dashboard.showStockChart('${item.stock_code}', '${item.stock_name || ''}')">
+                        <i class="fas fa-chart-line"></i> 图表
                     </button>
                 </td>
             </tr>
@@ -239,6 +278,19 @@ class StockDashboard {
             }
         });
     }
+
+    initializeChartModal() {
+        // Initialize the chart modal component
+        console.log('Creating ChartModal instance...');
+        try {
+            this.chartModal = new ChartModal({
+                apiBaseUrl: this.apiBaseUrl
+            });
+            console.log('ChartModal created successfully:', !!this.chartModal);
+        } catch (error) {
+            console.error('Error creating ChartModal:', error);
+        }
+    }
     
     updateCharts() {
         this.updateStrategyChart();
@@ -305,12 +357,26 @@ class StockDashboard {
         try {
             const response = await fetch(`${this.apiBaseUrl}/stocks/${stockCode}/history`);
             if (!response.ok) throw new Error('Failed to load stock history');
-            
+
             const history = await response.json();
             this.displayStockDetail(stockCode, history);
         } catch (error) {
             console.error('Error loading stock detail:', error);
             this.showError('加载股票详情失败');
+        }
+    }
+
+    showStockChart(stockCode, stockName = '') {
+        console.log('=== SHOW STOCK CHART ===');
+        console.log('Stock code:', stockCode);
+        console.log('Chart modal exists:', !!this.chartModal);
+
+        if (this.chartModal) {
+            console.log('Calling chartModal.show()...');
+            this.chartModal.show(stockCode, stockName);
+        } else {
+            console.error('Chart modal not initialized');
+            this.showError('图表组件未初始化');
         }
     }
     
@@ -359,11 +425,89 @@ class StockDashboard {
         return date.toLocaleDateString('zh-CN');
     }
     
-    updateLastUpdateTime() {
-        const now = new Date();
-        document.getElementById('lastUpdate').innerHTML = `
-            <i class="fas fa-clock me-1"></i>
-            最后更新: ${now.toLocaleString('zh-CN')}
+    updateLastUpdateTime(status = null) {
+        const lastUpdateElement = document.getElementById('lastUpdate');
+
+        if (status && status.has_update && status.formatted_time) {
+            // Use actual data update time from database
+            const statusIcon = this.getStatusIcon(status.status);
+            lastUpdateElement.innerHTML = `
+                <i class="fas fa-clock me-1"></i>
+                数据更新: ${status.formatted_time} ${statusIcon}
+            `;
+        } else {
+            // Fallback to current time if no data update status available
+            const now = new Date();
+            lastUpdateElement.innerHTML = `
+                <i class="fas fa-clock me-1"></i>
+                页面刷新: ${now.toLocaleString('zh-CN')}
+            `;
+        }
+    }
+
+    getStatusIcon(status) {
+        switch (status) {
+            case 'success':
+                return '<i class="fas fa-check-circle text-success ms-1" title="更新成功"></i>';
+            case 'failed':
+                return '<i class="fas fa-exclamation-circle text-danger ms-1" title="更新失败"></i>';
+            case 'in_progress':
+                return '<i class="fas fa-spinner fa-spin text-warning ms-1" title="更新中"></i>';
+            default:
+                return '<i class="fas fa-question-circle text-muted ms-1" title="状态未知"></i>';
+        }
+    }
+
+    updateDataFreshnessIndicator(freshness = null) {
+        const freshnessElement = document.getElementById('dataFreshness');
+
+        if (!freshnessElement) {
+            console.warn('Data freshness element not found');
+            return;
+        }
+
+        if (!freshness) {
+            freshnessElement.innerHTML = `
+                <i class="fas fa-question-circle text-muted me-1"></i>
+                <span class="text-muted">数据状态未知</span>
+            `;
+            return;
+        }
+
+        let statusClass, statusIcon, statusText;
+
+        switch (freshness.status) {
+            case 'current':
+                statusClass = 'text-success';
+                statusIcon = 'fas fa-check-circle';
+                statusText = '数据最新';
+                break;
+            case 'stale':
+                statusClass = 'text-danger';
+                statusIcon = 'fas fa-exclamation-triangle';
+                statusText = '数据过期';
+                break;
+            case 'partial':
+                statusClass = 'text-warning';
+                statusIcon = 'fas fa-exclamation-circle';
+                statusText = '数据部分更新';
+                break;
+            case 'no_data':
+                statusClass = 'text-muted';
+                statusIcon = 'fas fa-database';
+                statusText = '无数据';
+                break;
+            default:
+                statusClass = 'text-muted';
+                statusIcon = 'fas fa-question-circle';
+                statusText = '状态未知';
+        }
+
+        const tooltip = `${freshness.message}\n检查时间: ${freshness.check_time}\n预期日期: ${freshness.expected_date}`;
+
+        freshnessElement.innerHTML = `
+            <i class="${statusIcon} ${statusClass} me-1" title="${tooltip}"></i>
+            <span class="${statusClass}">${statusText}</span>
         `;
     }
     
@@ -486,7 +630,6 @@ class StockDashboard {
 
         try {
             await this.loadInitialData();
-            this.updateLastUpdateTime();
             this.showSuccess('数据刷新成功');
         } catch (error) {
             this.showError('数据刷新失败: ' + error.message);

@@ -7,7 +7,7 @@ from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, desc, func
 from database.config import SessionLocal
-from database.models import Stock, SelectionResult, ExecutionLog
+from database.models import Stock, SelectionResult, ExecutionLog, DataUpdateStatus
 
 
 class DatabaseOperations:
@@ -238,3 +238,76 @@ class DatabaseOperations:
                 latest_execution.start_time if latest_execution else None
             ),
         }
+
+    def get_latest_data_update_status(
+        self, update_type: str
+    ) -> Optional[DataUpdateStatus]:
+        """
+        Get the latest data update status for a specific update type
+        """
+        return (
+            self.db.query(DataUpdateStatus)
+            .filter(DataUpdateStatus.update_type == update_type)
+            .order_by(desc(DataUpdateStatus.last_update_time))
+            .first()
+        )
+
+    def update_data_update_status(
+        self,
+        update_type: str,
+        status: str,
+        last_update_time: datetime,
+        last_update_date: datetime,
+        end_time: Optional[datetime] = None,
+        error_message: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> DataUpdateStatus:
+        """
+        Update or create data update status record
+        """
+        # Get existing record or create new one
+        existing = self.get_latest_data_update_status(update_type)
+
+        if existing and existing.status == "in_progress" and status != "in_progress":
+            # Update existing in-progress record
+            existing.status = status
+            existing.last_update_time = last_update_time
+            existing.last_update_date = last_update_date
+            if end_time:
+                existing.updated_at = end_time
+            if error_message:
+                existing.last_error_message = error_message
+            if metadata:
+                existing.extra_data = str(metadata)  # Convert to JSON string
+            if status == "success":
+                existing.update_count = (existing.update_count or 0) + 1
+
+            self.db.commit()
+            self.db.refresh(existing)
+            return existing
+        else:
+            # Create new record
+            new_status = DataUpdateStatus(
+                update_type=update_type,
+                status=status,
+                last_update_time=last_update_time,
+                last_update_date=last_update_date,
+                last_error_message=error_message,
+                extra_data=str(metadata) if metadata else None,
+                update_count=1 if status == "success" else 0,
+            )
+
+            self.db.add(new_status)
+            self.db.commit()
+            self.db.refresh(new_status)
+            return new_status
+
+    def get_all_data_update_statuses(self) -> List[DataUpdateStatus]:
+        """
+        Get all data update statuses ordered by last update time
+        """
+        return (
+            self.db.query(DataUpdateStatus)
+            .order_by(desc(DataUpdateStatus.last_update_time))
+            .all()
+        )

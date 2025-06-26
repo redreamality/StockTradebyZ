@@ -18,8 +18,9 @@
 
 | 组件                    | 作用                                                                                     |
 | --------------------- | -------------------------------------------------------------------------------------- |
-| **Web仪表板**  | 现代化的Web界面，提供选股结果展示、历史记录查询、系统状态监控等功能           |
-| **API服务**  | RESTful API接口，支持程序化访问选股数据和系统状态           |
+| **Web仪表板**  | 现代化的Web界面，提供选股结果展示、历史记录查询、系统状态监控、**交互式K线图表**等功能           |
+| **K线图表功能**  | 基于TradingView Lightweight Charts的专业金融图表，支持日线/周线/月线切换、成交量显示、移动端优化           |
+| **API服务**  | RESTful API接口，支持程序化访问选股数据、系统状态、**OHLC数据**等           |
 | **自动调度器**  | 每日下午4点自动执行数据获取和选股分析，支持交易日判断           |
 | **`fetch_kline.py`**  | 从 AkShare 实时快照筛选出总市值 ≥ 指定阈值且排除创业板的股票，抓取其历史日 K 线并保存为 CSV。支持多线程、增量更新和今日快照自动补齐。           |
 | **`select_stock_enhanced.py`** | 读取本地 CSV 行情，根据 `configs.json` 中定义的策略（Selector）进行批量选股，并把结果写入数据库和日志。 |
@@ -55,7 +56,31 @@ system_status.bat
 uv run python system_check.py
 ```
 
-### 3. 启动Web界面（推荐）
+### 3. 自动化调度系统（推荐）
+
+系统现在包含集成的调度器，可自动在每天下午4点（北京时间）执行数据收集和分析：
+
+```bash
+# 启动 FastAPI 服务器（包含集成调度器）
+uv run uvicorn api.main:app --host 0.0.0.0 --port 8000
+
+# 或使用便捷脚本测试调度器
+uv run python test_scheduler.py
+```
+
+**调度器特性：**
+- ✅ 自动在交易日下午4点执行
+- ✅ 智能数据更新逻辑（避免重复更新）
+- ✅ 后台运行，不阻塞Web服务
+- ✅ 完整的状态跟踪和错误处理
+- ✅ 手动触发功能
+
+**调度器API端点：**
+- `GET /api/scheduler/status` - 查看调度器状态
+- `POST /api/scheduler/trigger` - 手动触发更新
+- `GET /api/scheduler/update-status` - 查看更新历史
+
+### 4. 启动Web界面
 
 启动API服务和Web仪表板：
 
@@ -107,14 +132,41 @@ uv run python scheduler/scheduler.py
 - **选股结果展示**：查看最新的选股结果，按策略分类显示
 - **历史记录查询**：查询指定日期范围内的选股历史
 - **系统状态监控**：实时查看系统运行状态和执行日志
+- **📈 K线图表功能**：点击股票表格中的"图表"按钮，查看专业的交互式K线图
+  - 支持日线/周线/月线切换
+  - 实时OHLC价格显示
+  - 成交量指标
+  - 缩放、平移等交互功能
+  - 移动端优化，支持触摸操作
 - **API文档**：访问 http://localhost:8000/docs 查看完整API文档
+
+### K线图表使用说明
+
+1. **打开图表**：在选股结果表格中，点击任意股票行的"图表"按钮
+2. **时间周期切换**：使用"日线"、"周线"、"月线"按钮切换不同时间周期
+3. **图表交互**：
+   - 鼠标滚轮或手势缩放
+   - 拖拽平移查看历史数据
+   - 悬停查看具体OHLC数据
+4. **控制按钮**：
+   - "适应内容"：自动调整图表显示全部数据
+   - "刷新"：重新加载最新数据
+
+> 📖 **详细文档**：查看 [CANDLESTICK_CHART_DOCUMENTATION.md](./CANDLESTICK_CHART_DOCUMENTATION.md) 了解K线图表功能的完整技术文档，包括API接口、性能优化、浏览器兼容性等详细信息。
 
 ### API接口
 
+#### 系统接口
 - `GET /api/health` - 系统健康检查
 - `GET /api/selections/latest` - 获取最新选股结果
 - `GET /api/selections/history` - 获取历史选股记录
 - `GET /api/executions/logs` - 获取执行日志
+
+#### K线数据接口
+- `GET /api/stocks` - 获取可用股票代码列表
+- `GET /api/stocks/{stock_code}/info` - 获取股票基本信息
+- `GET /api/stocks/{stock_code}/ohlc` - 获取OHLC数据（支持日线/周线/月线）
+  - 参数：`period`（daily/weekly/monthly）、`limit`（数据点数量）、`start_date`、`end_date`
 
 ---
 
@@ -206,7 +258,8 @@ uv run python scheduler/scheduler.py
 .
 ├── api/                     # API服务模块
 │   ├── main.py             # FastAPI应用主文件
-│   └── models.py           # API数据模型
+│   ├── models.py           # API数据模型
+│   └── stock_data_service.py # 股票数据服务（OHLC数据处理）
 ├── database/               # 数据库模块
 │   ├── config.py           # 数据库配置
 │   ├── models.py           # 数据库模型
@@ -217,6 +270,8 @@ uv run python scheduler/scheduler.py
 ├── static/                 # Web界面静态文件
 │   ├── index.html          # 主页面
 │   ├── app.js              # JavaScript逻辑
+│   ├── candlestick-chart.js # K线图表组件
+│   ├── chart-modal.js      # 图表模态框组件
 │   └── styles.css          # 样式文件
 ├── data/                   # 数据目录
 │   ├── *.csv               # 股票历史数据

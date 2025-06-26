@@ -103,3 +103,38 @@ class ExecutionLog(Base):
 
     def __repr__(self):
         return f"<ExecutionLog(date='{self.execution_date}', type='{self.execution_type}', status='{self.status}')>"
+
+
+class DataUpdateStatus(Base):
+    """
+    Track data update status and scheduling information
+    """
+
+    __tablename__ = "data_update_status"
+
+    id = Column(Integer, primary_key=True, index=True)
+    update_type = Column(
+        String(50), nullable=False
+    )  # "daily_data_fetch", "stock_selection", "full_update"
+    last_update_time = Column(DateTime, nullable=False)
+    last_update_date = Column(
+        DateTime, nullable=False
+    )  # The trading date for which data was updated
+    status = Column(String(20), nullable=False)  # "success", "failed", "in_progress"
+    next_scheduled_time = Column(
+        DateTime, nullable=True
+    )  # When the next update is scheduled
+    update_count = Column(Integer, default=0)  # Number of successful updates
+    last_error_message = Column(Text, nullable=True)
+    extra_data = Column(Text, nullable=True)  # JSON string for additional metadata
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Index for better query performance
+    __table_args__ = (
+        Index("idx_update_type_date", "update_type", "last_update_date"),
+        Index("idx_status_scheduled", "status", "next_scheduled_time"),
+    )
+
+    def __repr__(self):
+        return f"<DataUpdateStatus(type='{self.update_type}', last_update='{self.last_update_time}', status='{self.status}')>"

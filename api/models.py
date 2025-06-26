@@ -1,6 +1,7 @@
 """
 Pydantic models for API requests and responses
 """
+
 from datetime import datetime, date
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
@@ -8,6 +9,7 @@ from pydantic import BaseModel, Field
 
 class StockResponse(BaseModel):
     """Stock information response model"""
+
     id: int
     code: str
     name: Optional[str] = None
@@ -21,6 +23,7 @@ class StockResponse(BaseModel):
 
 class SelectionResultResponse(BaseModel):
     """Selection result response model"""
+
     id: int
     stock_code: str = Field(..., description="Stock code")
     stock_name: Optional[str] = Field(None, description="Stock name")
@@ -37,6 +40,7 @@ class SelectionResultResponse(BaseModel):
 
 class ExecutionLogResponse(BaseModel):
     """Execution log response model"""
+
     id: int
     execution_date: date
     execution_type: str
@@ -56,6 +60,7 @@ class ExecutionLogResponse(BaseModel):
 
 class SelectionSummaryResponse(BaseModel):
     """Summary of selection results"""
+
     date: date
     total_selected: int
     strategies: Dict[str, int]
@@ -64,6 +69,7 @@ class SelectionSummaryResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     """Health check response"""
+
     status: str = "healthy"
     timestamp: datetime
     database_status: str
@@ -72,6 +78,7 @@ class HealthResponse(BaseModel):
 
 class StatsResponse(BaseModel):
     """Statistics response"""
+
     total_selections: int
     strategy_stats: Dict[str, int]
     latest_execution: Optional[datetime] = None
@@ -79,6 +86,41 @@ class StatsResponse(BaseModel):
 
 class ErrorResponse(BaseModel):
     """Error response model"""
+
     error: str
     detail: Optional[str] = None
     timestamp: datetime
+
+
+class OHLCDataPoint(BaseModel):
+    """OHLC data point for candlestick charts"""
+
+    time: str = Field(..., description="Date in YYYY-MM-DD format")
+    open: float = Field(..., description="Opening price")
+    high: float = Field(..., description="High price")
+    low: float = Field(..., description="Low price")
+    close: float = Field(..., description="Closing price")
+    volume: Optional[int] = Field(None, description="Trading volume")
+
+
+class OHLCResponse(BaseModel):
+    """OHLC data response for candlestick charts"""
+
+    stock_code: str = Field(..., description="Stock code")
+    stock_name: Optional[str] = Field(None, description="Stock name")
+    period: str = Field(..., description="Time period (daily, weekly, monthly)")
+    data: List[OHLCDataPoint] = Field(..., description="OHLC data points")
+    total_points: int = Field(..., description="Total number of data points")
+
+
+class StockInfoResponse(BaseModel):
+    """Stock basic information response"""
+
+    code: str = Field(..., description="Stock code")
+    name: Optional[str] = Field(None, description="Stock name")
+    has_data: bool = Field(..., description="Whether stock has OHLC data available")
+    data_start_date: Optional[str] = Field(
+        None, description="First available data date"
+    )
+    data_end_date: Optional[str] = Field(None, description="Last available data date")
+    total_records: int = Field(0, description="Total number of records available")
