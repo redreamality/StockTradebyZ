@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Optional, Any
 
 import numpy as np
 import pandas as pd
@@ -58,80 +58,111 @@ def compute_dif(df: pd.DataFrame, fast: int = 12, slow: int = 26) -> pd.Series:
 
 def bbi_deriv_uptrend(
     bbi: pd.Series,
-    offset_n: int,
+    *,
     min_window: int,
     max_window: int | None = None,
+    q_threshold: float = 0.0,
 ) -> bool:
     """
-    以最新日 T，向前 offset_n 得到锚点 **T-n**；
-    在 [T-n-w+1, T-n] 区间上（w 自适应，w ≥ min_window 且 ≤ max_window）：
-        归一化 BBI(t) = BBI(t) / BBI(T-n-w+1)
-    要求 *每一日* 的一阶差分 ≥ 0（单调不降）。
-    选最长满足条件的窗口，存在即通过。
+    判断 BBI 是否“整体上升”。
+
+    令最新交易日为 T，在区间 [T-w+1, T]（w 自适应，w ≥ min_window 且 ≤ max_window）
+    内，先将 BBI 归一化：BBI_norm(t) = BBI(t) / BBI(T-w+1)。
+
+    再计算一阶差分 Δ(t) = BBI_norm(t) - BBI_norm(t-1)。  
+    若 Δ(t) 的前 q_threshold 分位数 ≥ 0，则认为该窗口通过；只要存在
+    **最长** 满足条件的窗口即可返回 True。q_threshold=0 时退化为
+    “全程单调不降”（旧版行为）。
+
+    Parameters
+    ----------
+    bbi : pd.Series
+        BBI 序列（最新值在最后一位）。
+    min_window : int
+        检测窗口的最小长度。
+    max_window : int | None
+        检测窗口的最大长度；None 表示不设上限。
+    q_threshold : float, default 0.0
+        允许一阶差分为负的比例（0 ≤ q_threshold ≤ 1）。
     """
+    if not 0.0 <= q_threshold <= 1.0:
+        raise ValueError("q_threshold 必须位于 [0, 1] 区间内")
+
     bbi = bbi.dropna()
-    if len(bbi) <= offset_n + min_window:
+    if len(bbi) < min_window:
         return False
 
-    anchor_idx = len(bbi) - offset_n - 1                 # T-n 的位置
-    longest = min(anchor_idx + 1, max_window or (anchor_idx + 1))
+    longest = min(len(bbi), max_window or len(bbi))
 
+    # 自最长窗口向下搜索，找到任一满足条件的区间即通过
     for w in range(longest, min_window - 1, -1):
-        seg = bbi.iloc[anchor_idx - w + 1 : anchor_idx + 1]
-        norm = seg / seg.iloc[0]                         # 归一化
-        if np.diff(norm.values).min() >= 0:              # 每日导数(差分)皆非负
+        seg = bbi.iloc[-w:]                # 区间 [T-w+1, T]
+        norm = seg / seg.iloc[0]           # 归一化
+        diffs = np.diff(norm.values)       # 一阶差分
+        if np.quantile(diffs, q_threshold) >= 0:
             return True
     return False
-
-
+    
 # --------------------------- Selector 类 --------------------------- #
 class BBIKDJSelector:
     """
-    自适应BBI(导数) + KDJ 选股器
+    自适应 *BBI(导数)* + *KDJ* 选股器
+        • BBI: 允许 bbi_q_threshold 比例的回撤
+        • KDJ: J < threshold ；或位于历史 J 的 j_q_threshold 分位及以下
+        • MACD: DIF > 0
+        • 收盘价波动幅度 ≤ price_range_pct
     """
 
     def __init__(
         self,
-        threshold: float = -5,
+        j_threshold: float = -5,
         bbi_min_window: int = 90,
-        bbi_offset_n: int = 0,
         max_window: int = 90,
-        price_range_pct: float = 100.0,          
+        price_range_pct: float = 100.0,
+        bbi_q_threshold: float = 0.05,
+        j_q_threshold: float = 0.10,
     ) -> None:
-        self.threshold = threshold
+        self.j_threshold = j_threshold
         self.bbi_min_window = bbi_min_window
-        self.bbi_offset_n = bbi_offset_n
         self.max_window = max_window
         self.price_range_pct = price_range_pct
+        self.bbi_q_threshold = bbi_q_threshold  # ← 原 q_threshold
+        self.j_q_threshold = j_q_threshold      # ← 新增
 
     # ---------- 单支股票过滤 ---------- #
     def _passes_filters(self, hist: pd.DataFrame) -> bool:
         hist = hist.copy()
         hist["BBI"] = compute_bbi(hist)
 
-        # 0. 收盘价波动幅度约束（窗口＝最近 max_window 根 K 线）
+        # 0. 收盘价波动幅度约束（最近 max_window 根 K 线）
         win = hist.tail(self.max_window)
         high, low = win["close"].max(), win["close"].min()
-        if low <= 0:
-            return False
-        if (high / low - 1) * 100 > self.price_range_pct:
+        if low <= 0 or (high / low - 1) > self.price_range_pct:
             return False
 
-        # 1. BBI 上升
+        # 1. BBI 上升（允许部分回撤）
         if not bbi_deriv_uptrend(
             hist["BBI"],
-            offset_n=self.bbi_offset_n,
             min_window=self.bbi_min_window,
             max_window=self.max_window,
+            q_threshold=self.bbi_q_threshold,
         ):
             return False
 
-        # 2. KDJ：指定日 J
-        j_today = float(compute_kdj(hist).iloc[-1]["J"])
-        if j_today >= self.threshold:
+        # 2. KDJ 过滤 —— 双重条件
+        kdj = compute_kdj(hist)
+        j_today = float(kdj.iloc[-1]["J"])
+
+        # 最近 max_window 根 K 线的 J 分位
+        j_window = kdj["J"].tail(self.max_window).dropna()
+        if j_window.empty:
+            return False
+        j_quantile = float(j_window.quantile(self.j_q_threshold))
+
+        if not (j_today < self.j_threshold or j_today <= j_quantile):
             return False
 
-        # 3. MACD：DIF>0
+        # 3. MACD：DIF > 0
         hist["DIF"] = compute_dif(hist)
         return hist["DIF"].iloc[-1] > 0
 
@@ -144,36 +175,25 @@ class BBIKDJSelector:
             hist = df[df["date"] <= date]
             if hist.empty:
                 continue
-            hist = hist.tail(self.max_window + self.bbi_offset_n + 5)
+            # 额外预留 20 根 K 线缓冲
+            hist = hist.tail(self.max_window + 20)
             if self._passes_filters(hist):
                 picks.append(code)
         return picks
-
-
-
+    
 
 class BBIShortLongSelector:
     """
-    BBI 上升 + 短/长期 RSV 条件 + DIF>0 选股器
-
-    Parameters
-    ----------
-    n_short        : 短期 RSV (公式中的 N1)
-    n_long         : 长期 RSV (公式中的 N2)
-    m              : 判断区间长度 (最近 m 个交易日，含 T)
-    bbi_min_window : BBI 上升检测的最短窗口
-    bbi_offset_n   : BBI 锚点相对 T 的偏移
-    max_window     : 读取历史的最大 K 线数
+    BBI 上升 + 短/长期 RSV 条件 + DIF > 0 选股器
     """
-
     def __init__(
         self,
         n_short: int = 3,
         n_long: int = 21,
         m: int = 3,
         bbi_min_window: int = 90,
-        bbi_offset_n: int = 0,
         max_window: int = 150,
+        bbi_q_threshold: float = 0.05,
     ) -> None:
         if m < 2:
             raise ValueError("m 必须 ≥ 2")
@@ -181,41 +201,43 @@ class BBIShortLongSelector:
         self.n_long = n_long
         self.m = m
         self.bbi_min_window = bbi_min_window
-        self.bbi_offset_n = bbi_offset_n
         self.max_window = max_window
+        self.bbi_q_threshold = bbi_q_threshold   # 新增参数
 
     # ---------- 单支股票过滤 ---------- #
     def _passes_filters(self, hist: pd.DataFrame) -> bool:
-        # 1. BBI 上升 ------------------
         hist = hist.copy()
         hist["BBI"] = compute_bbi(hist)
 
+        # 1. BBI 上升（允许部分回撤）
         if not bbi_deriv_uptrend(
             hist["BBI"],
-            offset_n=self.bbi_offset_n,
             min_window=self.bbi_min_window,
             max_window=self.max_window,
+            q_threshold=self.bbi_q_threshold,
         ):
             return False
 
-        # 2. 计算短期 / 长期 RSV ----------
+        # 2. 计算短/长期 RSV -----------------
         hist["RSV_short"] = compute_rsv(hist, self.n_short)
         hist["RSV_long"] = compute_rsv(hist, self.n_long)
 
         if len(hist) < self.m:
-            return False                                          # 数据不足
+            return False                        # 数据不足
 
-        win = hist.iloc[-self.m :]                                # 最近 m 天
-        long_ok = (win["RSV_long"] >= 80).all()                   # 长期 ≥ 80
+        win = hist.iloc[-self.m :]              # 最近 m 天
+        long_ok = (win["RSV_long"] >= 80).all() # 长期 RSV 全 ≥ 80
 
         short_series = win["RSV_short"]
-        short_start_end_ok = short_series.iloc[0] >= 80 and short_series.iloc[-1] >= 80
+        short_start_end_ok = (
+            short_series.iloc[0] >= 80 and short_series.iloc[-1] >= 80
+        )
         short_has_below_20 = (short_series < 20).any()
 
         if not (long_ok and short_start_end_ok and short_has_below_20):
             return False
 
-        # 3. MACD 中 DIF>0 --------------
+        # 3. MACD：DIF > 0 -------------------
         hist["DIF"] = compute_dif(hist)
         return hist["DIF"].iloc[-1] > 0
 
@@ -225,7 +247,6 @@ class BBIShortLongSelector:
         date: pd.Timestamp,
         data: Dict[str, pd.DataFrame],
     ) -> List[str]:
-        """在给定交易日 `date` 对股票池 `data` 做筛选"""
         picks: List[str] = []
         for code, df in data.items():
             hist = df[df["date"] <= date]
@@ -235,7 +256,6 @@ class BBIShortLongSelector:
             need_len = (
                 max(self.n_short, self.n_long)
                 + self.bbi_min_window
-                + self.bbi_offset_n
                 + self.m
             )
             hist = hist.tail(max(need_len, self.max_window))
@@ -246,7 +266,7 @@ class BBIShortLongSelector:
 
 class BreakoutVolumeKDJSelector:
     """
-    放量突破 + KDJ + DIF>0 + 收盘价波动幅度 选股器
+    放量突破 + KDJ + DIF>0 + 收盘价波动幅度 选股器   
     """
 
     def __init__(
@@ -256,7 +276,8 @@ class BreakoutVolumeKDJSelector:
         volume_threshold: float = 2.0 / 3,
         offset: int = 15,
         max_window: int = 120,
-        price_range_pct: float = 10.0,          
+        price_range_pct: float = 10.0,
+        j_q_threshold: float = 0.10,        # ← 新增
     ) -> None:
         self.j_threshold = j_threshold
         self.up_threshold = up_threshold
@@ -264,6 +285,7 @@ class BreakoutVolumeKDJSelector:
         self.offset = offset
         self.max_window = max_window
         self.price_range_pct = price_range_pct
+        self.j_q_threshold = j_q_threshold  # ← 新增
 
     # ---------- 单支股票过滤 ---------- #
     def _passes_filters(self, hist: pd.DataFrame) -> bool:
@@ -272,11 +294,9 @@ class BreakoutVolumeKDJSelector:
 
         hist = hist.tail(self.max_window).copy()
 
-        # ---- 收盘价波动幅度约束（窗口＝最近 max_window 根） ----
+        # ---- 收盘价波动幅度约束 ----
         high, low = hist["close"].max(), hist["close"].min()
-        if low <= 0:
-            return False
-        if (high / low - 1) * 100 > self.price_range_pct:
+        if low <= 0 or (high / low - 1) > self.price_range_pct:
             return False
 
         # ---- 技术指标 ----
@@ -284,22 +304,33 @@ class BreakoutVolumeKDJSelector:
         hist["pct_chg"] = hist["close"].pct_change() * 100
         hist["DIF"] = compute_dif(hist)
 
-        # 0) 指定日约束：J < j_threshold 且 DIF > 0
-        if hist["J"].iloc[-1] >= self.j_threshold or hist["DIF"].iloc[-1] <= 0:
+        # 0) 指定日约束：J < j_threshold 或位于历史分位；且 DIF > 0
+        j_today = float(hist["J"].iloc[-1])
+
+        j_window = hist["J"].tail(self.max_window).dropna()
+        if j_window.empty:
+            return False
+        j_quantile = float(j_window.quantile(self.j_q_threshold))
+
+        # 若不满足任一 J 条件，则淘汰
+        if not (j_today < self.j_threshold or j_today <= j_quantile):
+            return False
+        if hist["DIF"].iloc[-1] <= 0:
             return False
 
+        # ---- 放量突破条件 ----
         n = len(hist)
         wnd_start = max(0, n - self.offset - 1)
         last_idx = n - 1
 
-        for t_idx in range(wnd_start, last_idx):            # 探索突破日 T
+        for t_idx in range(wnd_start, last_idx):  # 探索突破日 T
             row = hist.iloc[t_idx]
 
-            # 2.1 较前一日涨幅
+            # 1) 单日涨幅
             if row["pct_chg"] < self.up_threshold:
                 continue
 
-            # 2.2 全局缩量（除 T 外）
+            # 2) 相对放量
             vol_T = row["volume"]
             if vol_T <= 0:
                 continue
@@ -307,15 +338,15 @@ class BreakoutVolumeKDJSelector:
             if not (vols_except_T <= self.volume_threshold * vol_T).all():
                 continue
 
-            # 2.4 价格创新高
+            # 3) 创新高
             if row["close"] <= hist["close"].iloc[:t_idx].max():
                 continue
 
-            # 2.3 J 高位持续
-            if not (hist["J"].iloc[t_idx:last_idx] > hist["J"].iloc[-1]-10).all():
+            # 4) T 之后 J 值维持高位
+            if not (hist["J"].iloc[t_idx:last_idx] > hist["J"].iloc[-1] - 10).all():
                 continue
 
-            return True
+            return True  # 满足所有条件
 
         return False
 

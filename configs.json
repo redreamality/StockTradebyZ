@@ -5,11 +5,12 @@
       "alias": "少妇战法",
       "activate": true,
       "params": {
-        "threshold": -6,
-        "bbi_min_window": 17,
-        "bbi_offset_n": 2,
+        "j_threshold": 1,
+        "bbi_min_window": 20,
         "max_window": 60,
-        "price_range_pct": 100
+        "price_range_pct": 0.5,
+        "bbi_q_threshold": 0.1,
+        "j_q_threshold": 0.10
       }
     },
     {
@@ -20,9 +21,9 @@
         "n_short": 3,
         "n_long": 21,
         "m": 3,
-        "bbi_min_window": 5,
-        "bbi_offset_n": 0,
-        "max_window": 60
+        "bbi_min_window": 2,
+        "max_window": 60,
+        "bbi_q_threshold": 0.2
       }
     },
     {
@@ -30,12 +31,13 @@
       "alias": "TePu战法",
       "activate": true,
       "params": {
-        "j_threshold": 1,        
-        "up_threshold": 3.0,       
+        "j_threshold": 1,
+        "j_q_threshold": 0.10,
+        "up_threshold": 3.0,
         "volume_threshold": 0.6667,
-        "offset": 15,             
+        "offset": 15,
         "max_window": 60,
-        "price_range_pct": 100
+        "price_range_pct": 0.5
       }
     }
   ]
