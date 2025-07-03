@@ -63,7 +63,7 @@ pip install -r requirements.txt
 3. **获取 Token**
    打开个人主页，点击 **「接口 Token」**，复制生成的 Token。
 4. **填入代码**
-   在 `fetch_kline.py` 约 **第 307 行**（以实际行为准）：
+   在 `fetch_kline.py` 约 **第 371 行**（以实际行为准）：
 
    ```python
    ts_token = "***"  # ← 替换为你的 Token
