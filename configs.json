@@ -39,6 +39,18 @@
         "max_window": 60,
         "price_range_pct": 0.5
       }
+    },
+    {
+      "class": "PeakKDJSelector",        
+      "alias": "填坑战法",
+      "activate": true,                 
+      "params": {
+        "j_threshold": 10,                 
+        "max_window": 100,                
+        "fluc_threshold": 0.03,
+        "j_q_threshold": 0.10,
+        "gap_threshold": 0.2
+      }
     }
   ]
 }
