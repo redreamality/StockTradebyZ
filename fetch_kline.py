@@ -22,7 +22,11 @@ from tqdm import tqdm
 warnings.filterwarnings("ignore")
 
 # --------------------------- 全局日志配置 --------------------------- #
-LOG_FILE = Path("fetch.log")
+# 确保日志目录存在
+log_dir = Path("logs")
+log_dir.mkdir(exist_ok=True)
+
+LOG_FILE = log_dir / "fetch.log"
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d %(message)s",
@@ -315,10 +319,34 @@ def _adjust_before_mootdx(
     return result
 
 
-def _get_kline_mootdx(
-    code: str, start: str, end: str, adjust: str, freq_code: int
-) -> pd.DataFrame:
-    symbol = code.zfill(6)
+# 全局客户端实例，用于批量查询时复用连接
+_mootdx_client = None
+
+
+def _get_mootdx_client():
+    """获取或创建mootdx客户端实例"""
+    global _mootdx_client
+    if _mootdx_client is None:
+        _mootdx_client = Quotes.factory(market="std")
+    return _mootdx_client
+
+
+def _get_kline_mootdx_batch(
+    codes: List[str], start: str, end: str, adjust: str, freq_code: int
+) -> dict:
+    """
+    批量获取mootdx K线数据
+
+    Args:
+        codes: 股票代码列表
+        start: 开始日期
+        end: 结束日期
+        adjust: 复权类型
+        freq_code: 频率代码
+
+    Returns:
+        dict: {code: DataFrame} 格式的结果字典
+    """
     # 将频率映射转换为mootdx需要的整数格式
     freq_map_to_int = {
         "5m": 0,
@@ -335,76 +363,99 @@ def _get_kline_mootdx(
     freq_str = _FREQ_MAP.get(freq_code, "day")
     freq_int = freq_map_to_int.get(freq_str, 9)  # 默认日线
 
-    client = Quotes.factory(market="std")
+    client = _get_mootdx_client()
+    results = {}
 
-    try:
-        # 根据adjust参数决定是否进行前复权处理
-        if adjust == "qfq":
-            # 获取不复权数据和除权除息数据，然后手动进行前复权调整
-            logger.debug(f"获取 {code} 的原始数据和除权除息数据进行前复权调整")
-            bfq_data = client.bars(symbol=symbol, frequency=freq_int)
-            xdxr_data = client.xdxr(symbol=symbol)
+    logger.debug(f"批量获取 {len(codes)} 只股票数据: {codes}")
 
-            if bfq_data is None or bfq_data.empty:
-                logger.warning("Mootdx 获取 %s 原始数据失败", code)
-                return pd.DataFrame()
+    for code in codes:
+        symbol = code.zfill(6)
+        try:
+            # 根据adjust参数决定是否进行前复权处理
+            if adjust == "qfq":
+                # 获取不复权数据和除权除息数据，然后手动进行前复权调整
+                logger.debug(f"获取 {code} 的原始数据和除权除息数据进行前复权调整")
+                bfq_data = client.bars(symbol=symbol, frequency=freq_int)
+                xdxr_data = client.xdxr(symbol=symbol)
 
-            # 添加股票代码列
-            bfq_data["code"] = symbol
+                if bfq_data is None or bfq_data.empty:
+                    logger.warning("Mootdx 获取 %s 原始数据失败", code)
+                    results[code] = pd.DataFrame()
+                    continue
 
-            # 进行前复权调整
-            if xdxr_data is not None and not xdxr_data.empty:
-                logger.debug(
-                    f"对 {code} 进行前复权调整，除权除息记录: {len(xdxr_data)} 条"
-                )
-                df = _adjust_before_mootdx(bfq_data, xdxr_data)
+                # 添加股票代码列
+                bfq_data["code"] = symbol
+
+                # 进行前复权调整
+                if xdxr_data is not None and not xdxr_data.empty:
+                    logger.debug(
+                        f"对 {code} 进行前复权调整，除权除息记录: {len(xdxr_data)} 条"
+                    )
+                    df = _adjust_before_mootdx(bfq_data, xdxr_data)
+                else:
+                    logger.debug(f"{code} 无除权除息数据，使用原始数据")
+                    df = bfq_data
             else:
-                logger.debug(f"{code} 无除权除息数据，使用原始数据")
-                df = bfq_data
-        else:
-            # 其他情况直接获取数据（不复权或后复权）
-            df = client.bars(symbol=symbol, frequency=freq_int, adjust=adjust or None)
+                # 其他情况直接获取数据（不复权或后复权）
+                df = client.bars(
+                    symbol=symbol, frequency=freq_int, adjust=adjust or None
+                )
 
-    except Exception as e:
-        logger.warning("Mootdx 拉取 %s 失败: %s", code, e)
-        return pd.DataFrame()
+        except Exception as e:
+            logger.warning("Mootdx 拉取 %s 失败: %s", code, e)
+            results[code] = pd.DataFrame()
+            continue
 
-    if df is None or df.empty:
-        return pd.DataFrame()
+        if df is None or df.empty:
+            results[code] = pd.DataFrame()
+            continue
 
-    # 重命名列以保持一致性
-    df = df.rename(
-        columns={
-            "datetime": "date",
-            "open": "open",
-            "high": "high",
-            "low": "low",
-            "close": "close",
-            "vol": "volume",
-        }
-    )
+        # 重命名列以保持一致性
+        df = df.rename(
+            columns={
+                "datetime": "date",
+                "open": "open",
+                "high": "high",
+                "low": "low",
+                "close": "close",
+                "vol": "volume",
+            }
+        )
 
-    # 去除重复列
-    df = df.loc[:, ~df.columns.duplicated()]
+        # 去除重复列
+        df = df.loc[:, ~df.columns.duplicated()]
 
-    # 处理日期列
-    if "date" not in df.columns:
-        if all(col in df.columns for col in ["year", "month", "day"]):
-            df["date"] = pd.to_datetime(df[["year", "month", "day"]])
-        elif "datetime" in df.columns:
-            df["date"] = pd.to_datetime(df["datetime"])
+        # 处理日期列
+        if "date" not in df.columns:
+            if all(col in df.columns for col in ["year", "month", "day"]):
+                df["date"] = pd.to_datetime(df[["year", "month", "day"]])
+            elif "datetime" in df.columns:
+                df["date"] = pd.to_datetime(df["datetime"])
 
-    df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+        df["date"] = pd.to_datetime(df["date"]).dt.normalize()
 
-    # 过滤日期范围
-    start_ts = pd.to_datetime(start, format="%Y%m%d")
-    end_ts = pd.to_datetime(end, format="%Y%m%d")
-    df = df[
-        (df["date"].dt.date >= start_ts.date()) & (df["date"].dt.date <= end_ts.date())
-    ].copy()
+        # 过滤日期范围
+        start_ts = pd.to_datetime(start, format="%Y%m%d")
+        end_ts = pd.to_datetime(end, format="%Y%m%d")
+        df = df[
+            (df["date"].dt.date >= start_ts.date())
+            & (df["date"].dt.date <= end_ts.date())
+        ].copy()
 
-    df = df.sort_values("date").reset_index(drop=True)
-    return df[["date", "open", "close", "high", "low", "volume"]]
+        df = df.sort_values("date").reset_index(drop=True)
+        results[code] = df[["date", "open", "close", "high", "low", "volume"]]
+
+    return results
+
+
+def _get_kline_mootdx(
+    code: str, start: str, end: str, adjust: str, freq_code: int
+) -> pd.DataFrame:
+    """
+    单只股票mootdx K线数据获取（保持向后兼容）
+    """
+    results = _get_kline_mootdx_batch([code], start, end, adjust, freq_code)
+    return results.get(code, pd.DataFrame())
 
 
 # ---------- 通用接口 ---------- #
@@ -525,7 +576,264 @@ def drop_dup_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[:, ~df.columns.duplicated()]
 
 
+def check_xd_stock(stock_code: str) -> bool:
+    """检查股票是否为近期除权股票（名称以XD开头）"""
+    try:
+        # 尝试从akshare获取股票名称
+        import akshare as ak
+
+        stock_info = ak.stock_individual_info_em(symbol=stock_code)
+        if not stock_info.empty:
+            stock_name = stock_info[stock_info["item"] == "股票简称"]["value"].iloc[0]
+            if stock_name.startswith("XD"):
+                logger.info("%s 检测到近期除权股票: %s", stock_code, stock_name)
+                return True
+    except Exception as e:
+        logger.debug("%s 获取股票名称失败: %s", stock_code, e)
+    return False
+
+
 # ---------- 单只股票抓取 ---------- #
+def fetch_batch_mootdx(
+    codes: List[str],
+    start: str,
+    end: str,
+    out_dir: Path,
+    incremental: bool,
+    freq_code: int,
+    adjust: str = "qfq",
+    max_null_ratio: float = 0.3,
+    min_rows_threshold: int = 50,
+) -> List[str]:
+    """
+    批量获取mootdx数据并保存到文件
+
+    Args:
+        codes: 股票代码列表
+        start: 开始日期
+        end: 结束日期
+        out_dir: 输出目录
+        incremental: 是否增量更新
+        freq_code: 频率代码
+        adjust: 复权类型
+        max_null_ratio: 最大空值比例
+        min_rows_threshold: 最小行数阈值
+
+    Returns:
+        List[str]: 失败的股票代码列表
+    """
+    failed_codes = []
+
+    # 预处理：检查哪些股票需要特殊处理（XD股票或数据不足）
+    codes_need_akshare = []
+    codes_use_mootdx = []
+
+    for code in codes:
+        csv_path = out_dir / f"{code}.csv"
+
+        # 检查是否是近期除权股票
+        if check_xd_stock(code):
+            logger.warning(
+                "%s 检测到近期除权股票，需要切换到akshare数据源从1970年开始抓取", code
+            )
+            codes_need_akshare.append(code)
+            continue
+
+        # 检查本地文件状态
+        if csv_path.exists():
+            try:
+                existing_df = pd.read_csv(csv_path, parse_dates=["date"])
+                if len(existing_df) < min_rows_threshold:
+                    logger.warning(
+                        "%s 本地文件数据行数不足 (%d < %d)，需要切换到akshare数据源从1970年开始抓取",
+                        code,
+                        len(existing_df),
+                        min_rows_threshold,
+                    )
+                    codes_need_akshare.append(code)
+                    continue
+                else:
+                    logger.debug(
+                        "%s 本地文件数据充足 (%d 行)，使用mootdx批量获取",
+                        code,
+                        len(existing_df),
+                    )
+            except Exception as e:
+                logger.warning(
+                    "%s 读取本地文件失败: %s，需要切换到akshare数据源", code, e
+                )
+                codes_need_akshare.append(code)
+                continue
+        else:
+            # 文件不存在，需要切换到akshare获取完整历史数据
+            logger.info(
+                "%s 本地文件不存在，需要切换到akshare数据源从1970年开始抓取", code
+            )
+            codes_need_akshare.append(code)
+            continue
+
+        # 可以使用mootdx批量获取
+        codes_use_mootdx.append(code)
+
+    # 处理需要akshare的股票（逐个处理）
+    for code in codes_need_akshare:
+        try:
+            success = fetch_one(
+                code=code,
+                start="19700101",  # 从1970年开始
+                end=end,
+                out_dir=out_dir,
+                incremental=False,  # 强制非增量模式
+                datasource="akshare",
+                freq_code=freq_code,
+                adjust=adjust,
+                max_null_ratio=max_null_ratio,
+                min_rows_threshold=min_rows_threshold,
+            )
+            if not success:
+                failed_codes.append(code)
+        except Exception as e:
+            logger.error(f"使用akshare处理 {code} 时发生异常: {e}")
+            failed_codes.append(code)
+
+    # 处理可以使用mootdx批量获取的股票
+    if codes_use_mootdx:
+        logger.debug(f"mootdx批量获取 {len(codes_use_mootdx)} 只股票数据")
+        batch_results = _get_kline_mootdx_batch(
+            codes_use_mootdx, start, end, adjust, freq_code
+        )
+
+        # 逐个处理和保存
+        for code in codes_use_mootdx:
+            try:
+                df = batch_results.get(code, pd.DataFrame())
+
+                if df.empty:
+                    logger.warning(f"批量获取 {code} 数据为空")
+                    failed_codes.append(code)
+                    continue
+
+                # 使用现有的保存和处理逻辑
+                success = _process_and_save_stock_data(
+                    code,
+                    df,
+                    out_dir,
+                    incremental,
+                    start,
+                    end,
+                    "mootdx",
+                    freq_code,
+                    adjust,
+                    max_null_ratio,
+                    min_rows_threshold,
+                )
+
+                if not success:
+                    failed_codes.append(code)
+
+            except Exception as e:
+                logger.error(f"处理 {code} 时发生异常: {e}")
+                failed_codes.append(code)
+
+    return failed_codes
+
+
+def _process_and_save_stock_data(
+    code: str,
+    df: pd.DataFrame,
+    out_dir: Path,
+    incremental: bool,
+    start: str,
+    end: str,
+    datasource: str,
+    freq_code: int,
+    adjust: str,
+    max_null_ratio: float,
+    min_rows_threshold: int,
+) -> bool:
+    """
+    处理和保存单只股票数据的通用逻辑
+
+    Args:
+        code: 股票代码
+        df: 股票数据DataFrame
+        out_dir: 输出目录
+        incremental: 是否增量更新
+        start: 开始日期
+        end: 结束日期
+        datasource: 数据源
+        freq_code: 频率代码
+        adjust: 复权类型
+        max_null_ratio: 最大空值比例
+        min_rows_threshold: 最小行数阈值
+
+    Returns:
+        bool: 是否成功
+    """
+    csv_path = out_dir / f"{code}.csv"
+
+    try:
+        if df.empty:
+            logger.debug("%s 无新数据", code)
+            return True  # 无新数据也算成功
+
+        logger.debug(
+            "%s 获得 %d 条数据 (数据源: %s, 日期范围: %s-%s)",
+            code,
+            len(df),
+            datasource,
+            start,
+            end,
+        )
+
+        # 数据质量检查
+        quality_ok, quality_msg = check_data_quality(df, code, max_null_ratio)
+        if not quality_ok:
+            logger.warning("%s 数据质量不佳: %s", code, quality_msg)
+            return False
+
+        new_df = validate(df)
+        if csv_path.exists() and incremental:
+            old_df = pd.read_csv(csv_path, parse_dates=["date"], index_col=False)
+            old_df = drop_dup_columns(old_df)
+            new_df = drop_dup_columns(new_df)
+
+            # 获取新数据的日期范围
+            if not new_df.empty:
+                new_start_date = new_df["date"].min()
+                # 保留旧数据中早于新数据开始日期的部分
+                old_df_filtered = old_df[old_df["date"] < new_start_date]
+                # 合并：旧数据（过滤后）+ 新数据，新数据会覆盖重叠部分
+                new_df = pd.concat(
+                    [old_df_filtered, new_df], ignore_index=True
+                ).sort_values("date")
+                logger.debug(
+                    "%s 合并数据：保留 %d 条旧数据，添加 %d 条新数据",
+                    code,
+                    len(old_df_filtered),
+                    len(new_df) - len(old_df_filtered),
+                )
+            else:
+                # 如果新数据为空，保持原有数据
+                new_df = old_df
+
+        # 最终数据质量检查（合并后）
+        final_quality_ok, final_quality_msg = check_data_quality(
+            new_df, code, max_null_ratio
+        )
+        if final_quality_ok:
+            logger.debug("%s 数据质量检查通过: %s", code, final_quality_msg)
+        else:
+            logger.warning("%s 最终数据仍有质量问题: %s", code, final_quality_msg)
+
+        new_df.to_csv(csv_path, index=False)
+        return True  # 成功
+
+    except Exception as e:
+        logger.error("%s 处理和保存数据失败: %s", code, e)
+        return False
+
+
 def fetch_one(
     code: str,
     start: str,
@@ -540,25 +848,6 @@ def fetch_one(
 ) -> bool:
 
     csv_path = out_dir / f"{code}.csv"
-
-    # 检查是否为近期除权股票（股票名称以XD开头）
-    def check_xd_stock(stock_code: str) -> bool:
-        """检查股票是否为近期除权股票（名称以XD开头）"""
-        try:
-            # 尝试从akshare获取股票名称
-            import akshare as ak
-
-            stock_info = ak.stock_individual_info_em(symbol=stock_code)
-            if not stock_info.empty:
-                stock_name = stock_info[stock_info["item"] == "股票简称"]["value"].iloc[
-                    0
-                ]
-                if stock_name.startswith("XD"):
-                    logger.info("%s 检测到近期除权股票: %s", stock_code, stock_name)
-                    return True
-        except Exception as e:
-            logger.debug("%s 获取股票名称失败: %s", stock_code, e)
-        return False
 
     # 增量更新：若本地已有数据则从前一天开始（覆盖前一日数据）
     # 对于近两日的数据，无论CSV是否存在当天数据都进行更新
@@ -772,6 +1061,48 @@ def load_failed_list(out_dir: Path) -> List[str]:
     return failed_codes
 
 
+def remove_from_failed_list(successful_codes: List[str], out_dir: Path):
+    """立即从失败列表中移除成功的股票"""
+    if not successful_codes:
+        return
+
+    failed_file = out_dir / "failed_stocks.txt"
+    if not failed_file.exists():
+        return
+
+    try:
+        remaining_failed = []
+        with open(failed_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and line not in successful_codes:
+                    remaining_failed.append(line)
+
+        # 重写失败文件，只保留真正失败的
+        if remaining_failed:
+            # 直接重写文件，不使用 save_failed_list 避免合并
+            timestamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(failed_file, "w", encoding="utf-8") as f:
+                f.write(f"# 抓取失败的股票列表 - 更新时间: {timestamp}\n")
+                f.write("# 失败原因: 移除成功股票后的失败列表\n")
+                f.write(f"# 总计 {len(remaining_failed)} 只股票\n")
+                f.write("# 格式: 每行一个股票代码\n")
+                f.write("#" + "=" * 50 + "\n")
+                for code in remaining_failed:
+                    f.write(f"{code}\n")
+            logger.debug(
+                "已从失败列表中移除 %d 只成功股票，剩余 %d 只失败股票",
+                len(successful_codes),
+                len(remaining_failed),
+            )
+        else:
+            # 如果没有失败的股票，删除失败文件
+            failed_file.unlink()
+            logger.info("所有失败股票已成功处理，已删除失败列表文件")
+    except Exception as e:
+        logger.warning("从失败列表移除成功股票时出错: %s", e)
+
+
 def check_existing_data(
     codes: List[str], out_dir: Path, start: str, end: str
 ) -> tuple[List[str], List[str]]:
@@ -968,7 +1299,7 @@ def main():
         end,
     )
 
-    # ---------- 多线程抓取（带失败重试） ---------- #
+    # ---------- 批量抓取（带失败重试） ---------- #
     failed_codes = []
     retry_round = 1
     max_retry_rounds = 3
@@ -982,44 +1313,102 @@ def main():
 
         current_failed = []
 
-        with ThreadPoolExecutor(max_workers=args.workers) as executor:
-            # 提交任务
-            future_to_code = {
-                executor.submit(
-                    fetch_one,
-                    code,
-                    start,
-                    end,
-                    out_dir,
-                    True,
-                    args.datasource,
-                    args.frequency,
-                    args.adjust,
-                    args.max_null_ratio,
-                    args.min_rows_threshold,
-                ): code
-                for code in codes_to_process
-            }
+        if args.datasource == "mootdx":
+            # 使用批量处理模式
+            batch_size = 20  # 每批处理20只股票
+            logger.info(f"使用mootdx批量模式，批量大小: {batch_size}")
 
-            # 收集结果
-            desc = f"第{retry_round}轮下载" if retry_round > 1 else "下载进度"
-            for future in tqdm(
-                as_completed(future_to_code), total=len(future_to_code), desc=desc
-            ):
-                code = future_to_code[future]
+            # 分批处理
+            for i in range(0, len(codes_to_process), batch_size):
+                batch_codes = codes_to_process[i : i + batch_size]
+                logger.debug(f"处理批次 {i//batch_size + 1}: {len(batch_codes)} 只股票")
+
                 try:
-                    success = future.result()
-                    if not success:
+                    batch_failed = fetch_batch_mootdx(
+                        batch_codes,
+                        start,
+                        end,
+                        out_dir,
+                        True,  # incremental
+                        args.frequency,
+                        args.adjust,
+                        args.max_null_ratio,
+                        args.min_rows_threshold,
+                    )
+                    current_failed.extend(batch_failed)
+
+                    # 立即保存失败的股票
+                    if batch_failed:
+                        save_failed_list(
+                            batch_failed, out_dir, f"第{retry_round}轮批量抓取失败"
+                        )
+
+                    # 立即从失败列表中移除成功的股票
+                    batch_successful = [
+                        code for code in batch_codes if code not in batch_failed
+                    ]
+                    if batch_successful:
+                        remove_from_failed_list(batch_successful, out_dir)
+
+                except Exception as e:
+                    logger.error("批次处理失败: %s", e)
+                    current_failed.extend(batch_codes)
+                    save_failed_list(
+                        batch_codes,
+                        out_dir,
+                        f"第{retry_round}轮批次异常: {str(e)[:50]}",
+                    )
+        else:
+            # 使用原有的多线程处理模式（非mootdx数据源）
+            with ThreadPoolExecutor(max_workers=args.workers) as executor:
+                # 提交任务
+                future_to_code = {
+                    executor.submit(
+                        fetch_one,
+                        code,
+                        start,
+                        end,
+                        out_dir,
+                        True,
+                        args.datasource,
+                        args.frequency,
+                        args.adjust,
+                        args.max_null_ratio,
+                        args.min_rows_threshold,
+                    ): code
+                    for code in codes_to_process
+                }
+
+                # 收集结果
+                desc = f"第{retry_round}轮下载" if retry_round > 1 else "下载进度"
+                batch_successful = []  # 收集本轮成功的股票
+
+                for future in tqdm(
+                    as_completed(future_to_code), total=len(future_to_code), desc=desc
+                ):
+                    code = future_to_code[future]
+                    try:
+                        success = future.result()
+                        if not success:
+                            current_failed.append(code)
+                            # 立即保存失败的股票
+                            save_failed_list(
+                                [code], out_dir, f"第{retry_round}轮抓取失败"
+                            )
+                        else:
+                            # 收集成功的股票
+                            batch_successful.append(code)
+                    except Exception as e:
+                        logger.error("处理 %s 时发生异常: %s", code, e)
                         current_failed.append(code)
                         # 立即保存失败的股票
-                        save_failed_list([code], out_dir, f"第{retry_round}轮抓取失败")
-                except Exception as e:
-                    logger.error("处理 %s 时发生异常: %s", code, e)
-                    current_failed.append(code)
-                    # 立即保存失败的股票
-                    save_failed_list(
-                        [code], out_dir, f"第{retry_round}轮异常: {str(e)[:50]}"
-                    )
+                        save_failed_list(
+                            [code], out_dir, f"第{retry_round}轮异常: {str(e)[:50]}"
+                        )
+
+                # 立即从失败列表中移除成功的股票
+                if batch_successful:
+                    remove_from_failed_list(batch_successful, out_dir)
 
         # 更新失败列表和下一轮要处理的股票
         failed_codes.extend(current_failed)
@@ -1048,35 +1437,38 @@ def main():
     final_failed = list(set(failed_codes))  # 最终失败的股票（去重）
 
     # 清理成功的股票从失败列表中移除
-    if final_failed:
-        successful_codes = [
-            code for code in codes_to_download if code not in final_failed
-        ]
-        if successful_codes:
-            # 从失败文件中移除成功的股票
-            failed_file = out_dir / "failed_stocks.txt"
-            if failed_file.exists():
-                try:
-                    remaining_failed = []
-                    with open(failed_file, "r", encoding="utf-8") as f:
-                        for line in f:
-                            line = line.strip()
-                            if (
-                                line
-                                and not line.startswith("#")
-                                and line not in successful_codes
-                            ):
-                                remaining_failed.append(line)
+    successful_codes = [code for code in codes_to_download if code not in final_failed]
 
-                    # 重写失败文件，只保留真正失败的
-                    if remaining_failed:
-                        save_failed_list(remaining_failed, out_dir, "最终失败列表")
-                    else:
-                        # 如果没有失败的股票，删除失败文件
-                        failed_file.unlink()
-                        logger.info("所有股票处理成功，已删除失败列表文件")
-                except Exception as e:
-                    logger.warning("清理失败列表时出错: %s", e)
+    # 只要有成功的股票或者没有失败的股票，就需要清理失败列表
+    if successful_codes or not final_failed:
+        failed_file = out_dir / "failed_stocks.txt"
+        if failed_file.exists():
+            try:
+                remaining_failed = []
+                with open(failed_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if (
+                            line
+                            and not line.startswith("#")
+                            and line not in successful_codes
+                        ):
+                            remaining_failed.append(line)
+
+                # 重写失败文件，只保留真正失败的
+                if remaining_failed:
+                    save_failed_list(remaining_failed, out_dir, "最终失败列表")
+                    logger.info(
+                        "已从失败列表中移除 %d 只成功股票，剩余 %d 只失败股票",
+                        len(successful_codes),
+                        len(remaining_failed),
+                    )
+                else:
+                    # 如果没有失败的股票，删除失败文件
+                    failed_file.unlink()
+                    logger.info("所有股票处理成功，已删除失败列表文件")
+            except Exception as e:
+                logger.warning("清理失败列表时出错: %s", e)
 
     logger.info("=" * 60)
     logger.info("抓取完成统计:")

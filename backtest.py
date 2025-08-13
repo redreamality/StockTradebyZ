@@ -30,11 +30,15 @@ from Selector import (
 from select_stock import load_data, load_config, instantiate_selector
 
 # 设置日志
+# 确保日志目录存在
+log_dir = Path("logs")
+log_dir.mkdir(exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler("backtest.log", encoding="utf-8"),
+        logging.FileHandler(log_dir / "backtest.log", encoding="utf-8"),
         logging.StreamHandler(),
     ],
 )
